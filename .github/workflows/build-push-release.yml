@@ -9,19 +9,74 @@ on:
       - "v*.*.*-*" # Support for pre-release tags like v1.2.3-alpha
 
 jobs:
-  build-and-push:
+  # -----------------------------------------------------------------------
+  # Compute the version tag and lowercase registry owner once for all jobs.
+  # Tag pushes use the tag name; branch pushes produce a SemVer snapshot.
+  # -----------------------------------------------------------------------
+  setup:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      registry_owner: ${{ steps.version.outputs.registry_owner }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Set up Go
-        uses: actions/setup-go@v4
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          go-version: '1.24.4'
+          fetch-depth: 0
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+      - name: Determine release metadata
+        id: version
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "registry_owner=${OWNER}" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=0.0.0-main-$(date -u +'%Y%m%d%H%M%S')-$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          fi
+
+  # -----------------------------------------------------------------------
+  # Build one image per service per arch in parallel on native runners.
+  # Each job pushes by digest only (no tag yet) and uploads the digest file
+  # as an artifact for the merge step.
+  # -----------------------------------------------------------------------
+  build-images:
+    needs: setup
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: workloadmanager
+            dockerfile: docker/Dockerfile
+            os: ubuntu-latest
+            platform: linux/amd64
+          - service: workloadmanager
+            dockerfile: docker/Dockerfile
+            os: ubuntu-24.04-arm
+            platform: linux/arm64
+          - service: agentcube-router
+            dockerfile: docker/Dockerfile.router
+            os: ubuntu-latest
+            platform: linux/amd64
+          - service: agentcube-router
+            dockerfile: docker/Dockerfile.router
+            os: ubuntu-24.04-arm
+            platform: linux/arm64
+          - service: picod
+            dockerfile: docker/Dockerfile.picod
+            os: ubuntu-latest
+            platform: linux/amd64
+          - service: picod
+            dockerfile: docker/Dockerfile.picod
+            os: ubuntu-24.04-arm
+            platform: linux/arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
@@ -30,20 +85,138 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine tag
-        id: determine_tag
-        run: |
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
-            echo "TAG=${{ github.ref_name }}" >> $GITHUB_ENV
-          else
-            echo "TAG=latest" >> $GITHUB_ENV
-          fi
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - name: Build and push images
-        env:
-          # Please confirm that there are no uppercase letters in github.repository_owner.
-          IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+      - name: Docker image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ needs.setup.outputs.registry_owner }}/${{ matrix.service }}
+          tags: |
+            type=raw,value=${{ needs.setup.outputs.tag }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}-${{ matrix.os }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}-${{ matrix.os }}
+          outputs: >-
+            type=image, name=ghcr.io/${{ needs.setup.outputs.registry_owner
+            }}/${{ matrix.service }}, push-by-digest=true, name-canonical=true,
+            push=true
+
+      - name: Export digest
         run: |
-          make docker-buildx-push IMAGE_REGISTRY=$IMAGE_REGISTRY WORKLOAD_MANAGER_IMAGE=workloadmanager:${{ env.TAG }}
-          make docker-buildx-push-router IMAGE_REGISTRY=$IMAGE_REGISTRY ROUTER_IMAGE=agentcube-router:${{ env.TAG }}
-          make docker-buildx-push-picod IMAGE_REGISTRY=$IMAGE_REGISTRY PICOD_IMAGE=picod:${{ env.TAG }}
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.service }}-${{ matrix.platform == 'linux/amd64' &&
+            'amd64' || 'arm64' }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -----------------------------------------------------------------------
+  # Merge per-arch digests into a single multi-arch manifest and tag it.
+  # Runs once per service after all build-images jobs finish.
+  # -----------------------------------------------------------------------
+  merge-images:
+    needs: [ setup, build-images ]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      matrix:
+        service: [ workloadmanager, agentcube-router, picod ]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.service }}-*
+          merge-multiple: true
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ needs.setup.outputs.registry_owner }}/${{ matrix.service }}
+          tags: |
+            type=raw,value=${{ needs.setup.outputs.tag }}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Create and push multi-arch manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          DOCKER_METADATA_OUTPUT_JSON: ${{ steps.meta.outputs.json }}
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf 'ghcr.io/${{ needs.setup.outputs.registry_owner }}/${{ matrix.service }}@sha256:%s ' *)
+
+  # -----------------------------------------------------------------------
+  # Package and push the Helm chart to GHCR OCI after all images are ready.
+  # -----------------------------------------------------------------------
+  push-helm-chart:
+    needs: [ setup, merge-images ]
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Set up yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Login Helm to GitHub Container Registry
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Package Helm chart
+        env:
+          CHART_PATH: manifests/charts/base
+          IMAGE_REGISTRY: ghcr.io/${{ needs.setup.outputs.registry_owner }}
+          TAG: ${{ needs.setup.outputs.tag }}
+        run: |
+          yq e -i '.version = env(TAG) | .appVersion = env(TAG)' "${CHART_PATH}/Chart.yaml"
+          yq e -i '
+            .router.image.repository = env(IMAGE_REGISTRY) + "/agentcube-router" |
+            .router.image.tag = env(TAG) |
+            .workloadmanager.image.repository = env(IMAGE_REGISTRY) + "/workloadmanager" |
+            .workloadmanager.image.tag = env(TAG)
+          ' "${CHART_PATH}/values.yaml"
+          helm package "${CHART_PATH}" --version "${TAG}" --app-version "${TAG}"
+
+      - name: Push Helm chart
+        env:
+          TAG: ${{ needs.setup.outputs.tag }}
+          REGISTRY_OWNER: ${{ needs.setup.outputs.registry_owner }}
+        run: |
+          helm push "agentcube-${TAG}.tgz" "oci://ghcr.io/${REGISTRY_OWNER}/charts"
