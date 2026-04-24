@@ -1,29 +1,38 @@
 # AgentCube v0.1.0 正式发布：让 AI Agent 成为 Kubernetes 的一等公民
 
-AgentCube 是 Volcano 社区的子项目，将 AI Agent 和代码解释器建模为 Kubernetes 原生的 Serverless 工作负载。v0.1.0 是 AgentCube 的首个正式版本。
+云原生批量计算引擎 Volcano 社区全新子项目 AgentCube 现已正式发布。AgentCube 的诞生基于 Volcano 在大规模高性能计算调度领域多年的生产实践积累，它将这种高并发、高吞吐的调度能力延伸至 AI 领域，构建了一套面向智能体（Agent）工作负载的 Serverless 编排层。
+
+**v0.1.0 是 AgentCube 的首个正式版本**，建立了完整的基础架构，主要特性包括：
+
+- **AgentRuntime / CodeInterpreter CRD** —— 两种 Kubernetes 原生的 Agent 工作负载抽象
+- **Session-Based MicroVM 路由** —— 基于会话的有状态请求路由，每会话独立沙箱隔离
+- **Warm Pool 预热池** —— 预创建沙箱消除冷启动延迟
+- **PicoD 轻量级沙箱守护进程** —— 替代 SSH，通过 RESTful API 实现代码执行与文件操作
+- **RSA/JWT 安全链** —— Router 到 PicoD 的非对称加密认证
+- **双策略 GC** —— 空闲超时 + 绝对最大时长的自动沙箱回收
+- **Python SDK 及框架集成** —— 开箱即用的 SDK，支持 LangChain 和 Dify
 
 ---
 
-## 为什么需要 AgentCube？
+## 从 Kubernetes 到 Agent Native
 
-AI Agent 正在改变软件的构建和运行方式。对话式智能体、自动化代码执行、多步推理与工具调用——这些场景都需要一种**有状态、可隔离、低延迟**的运行时环境。
+随着大语言模型（LLM）技术的成熟，技术架构正从“无状态推理”向“自主智能体（Autonomous Agents）”演进。Kubernetes 凭借其成熟的生态和对异构算力的标准化管理，已成为构建 AI 基础设施的事实标准。但在面对 AI Agent 这种“高并发、短时效、强状态依赖”的新型负载时，原生 Kubernetes 仍存在显著的粒度错配与机制缺位：
 
-然而，Kubernetes 体系是为**长驻微服务**设计的。面对高频创建、短时运行、需要会话级隔离的 Agent 工作负载，两者之间存在显著的鸿沟：
+**启动延迟与交互体验的矛盾。** Agent 的交互要求毫秒级响应，然而原生 K8s Pod 启动流程——调度、IP 分配、镜像拉取、容器启动——往往在秒级甚至分钟级。对于频繁拉起 Code Interpreter 或临时子 Agent 的场景，这种冷启动延迟是用户无法接受的。
 
-| 痛点 | 描述 |
-|------|------|
-| **冷启动延迟高** | 每次 Agent 会话都要拉起完整 Pod，交互式体验受阻且运行成本显著增加 |
-| **运行时管理混乱** | Agent 运行时散落在业务代码中，缺乏统一的安全策略与生命周期管理 |
-| **资源利用率低** | 轻量级突发型 Agent 负载使用重量级基础设施原语，浪费 CPU/GPU 资源 |
-| **缺少统一抽象** | 没有 Kubernetes 原生的方式来声明、启动和管理 Agent 会话 |
+**资源利用率的挑战。** Agent 是典型的 IO 密集型负载——在一次会话中，90% 的时间可能都在等待 LLM 生成 Token 或等待外部工具响应。如果在 K8s 上为每个 Agent 独占一个 Pod，会导致大量 CPU/Memory 资源在等待期间被闲置浪费。
 
-AgentCube 的目标就是填补这个空白。它将 AI Agent 和代码解释器建模为 Kubernetes 的**一等公民**——像 Serverless 函数一样按需调度、自动伸缩，同时拥有微虚拟机级别的强隔离保障。
+**会话状态管理的缺失。** K8s 对无状态工作负载天然友好，但 Agent 高度依赖上下文（Context/Memory）。Pod 重启意味着内存数据丢失，开发者被迫在应用层通过外部存储重建上下文，带来巨大的复杂性和网络开销。
+
+**安全隔离难题。** 高级 Agent（如 Data Analyst）需要运行由 LLM 生成的不可信代码。普通的 runC 容器如果执行 `rm -rf /` 具有极高风险。企业级 Agent 平台迫切需要一种既能快速启动，又能提供强隔离（如 MicroVM）的沙箱环境。
+
+AgentCube 正是为了在 Kubernetes 的算力底座之上填补上述机制空白而构建。它通过扩展 Kubernetes API，将 Agent 和 Tool（Code Interpreter、BrowserUse 等）提升为集群的一等公民——不仅仅是一组 CRD，更是一套面向 Agent 的 Serverless 编排层。
 
 ---
 
 ## 整体架构
 
-AgentCube 的架构分为三层：**数据平面（Router）**、**控制平面（Workload Manager）** 和 **沙箱运行时（PicoD）**，通过 Redis/ValKey 共享会话状态，实现各组件的水平扩展。
+AgentCube 的架构分为三层：**数据平面（Router）**、**控制平面（Workload Manager）** 和 **沙箱运行时（PicoD）**，通过 Redis/Valkey 共享会话状态，实现各组件的水平扩展。
 
 ![AgentCube 整体架构图](https://raw.githubusercontent.com/volcano-sh/agentcube/main/docs/design/images/agentcube.svg)
 
@@ -36,7 +45,7 @@ AgentCube 的架构分为三层：**数据平面（Router）**、**控制平面�
 | **Router** | 数据平面入口 | HTTP 反向代理、会话路由、JWT 签名、并发控制 |
 | **Workload Manager** | 控制平面 | 沙箱创建/删除、预热池管理、双策略 GC |
 | **PicoD** | 沙箱内守护进程 | 代码执行、文件 I/O、JWT 认证、路径沙箱化 |
-| **Session Store** | 状态存储 | Redis/ValKey 支持，Sorted Set 索引加速查询 |
+| **Session Store** | 状态存储 | Redis/Valkey 支持，Sorted Set 索引加速查询 |
 
 一次完整的调用流程如下：
 
@@ -317,7 +326,7 @@ AgentCube 可以作为 LangChain 的 `@tool` 接入 ReAct Agent 工作流，代�
 ### 前置条件
 
 - Kubernetes 集群 v1.24+
-- Redis 或 ValKey 实例
+- Redis 或 Valkey 实例
 - `sigs.k8s.io/agent-sandbox` v0.1.1 CRD 已安装
 
 ### Helm 安装
