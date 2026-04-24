@@ -25,7 +25,7 @@ AgentCube 的目标就是填补这个空白。它将 AI Agent 和代码解释器
 
 AgentCube 的架构分为三层：**数据平面（Router）**、**控制平面（Workload Manager）** 和 **沙箱运行时（PicoD）**，通过 Redis/ValKey 共享会话状态，实现各组件的水平扩展。
 
-![AgentCube 整体架构图](./images/agentcube.svg)
+![AgentCube 整体架构图](https://raw.githubusercontent.com/volcano-sh/agentcube/main/docs/design/images/agentcube.svg)
 
 <p align="center"><em>图 1：AgentCube 整体架构 —— Router 接收请求并路由至沙箱，Workload Manager 管理沙箱生命周期，PicoD 负责沙箱内执行</em></p>
 
@@ -41,19 +41,24 @@ AgentCube 的架构分为三层：**数据平面（Router）**、**控制平面�
 一次完整的调用流程如下：
 
 ```
-┌─────────┐     ① HTTP 请求         ┌──────────┐     ② 查询/创建沙箱    ┌──────────────────┐
-│  Client  │ ───────────────────────▶│  Router  │ ──────────────────────▶│ Workload Manager │
-└─────────┘  x-agentcube-session-id  └──────────┘                       └──────────────────┘
-                                          │                                     │
-                                          │ ④ JWT签名 + 反向代理                 │ ③ 创建/领取沙箱 Pod
-                                          ▼                                     ▼
-                                    ┌──────────┐                        ┌───────────────┐
-                                    │  PicoD   │ ◀───── 运行在 ────────│  Sandbox Pod  │
-                                    └──────────┘                        └───────────────┘
-                                          │
-                                          │ ⑤ 验证 JWT → 执行命令 → 返回结果
-                                          ▼
-                                    stdout / stderr / exit_code
++----------+                  +----------+                  +------------------+
+|  Client  | --- 1) HTTP ---> |  Router  | --- 2) alloc --> | Workload Manager |
++----------+                  +----+-----+                  +--------+---------+
+                                   |                                 |
+                          4) sign JWT                       3) create/claim
+                             + proxy                          Sandbox Pod
+                                   |                                 |
+                                   v                                 v
+                              +--------+                    +-------------+
+                              | PicoD  | <-- running in --- | Sandbox Pod |
+                              +---+----+                    +-------------+
+                                  |
+                         5) verify JWT
+                            execute cmd
+                            return result
+                                  |
+                                  v
+                         stdout / stderr / exit_code
 ```
 
 ---
@@ -158,22 +163,22 @@ spec:
 交互式 Agent 场景下，从零创建微虚拟机沙箱带来的冷启动延迟是不可接受的。AgentCube 引入了**预热池机制**：
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                    Warm Pool (预热池)                        │
-│                                                            │
-│   ┌─────────┐   ┌─────────┐   ┌─────────┐                │
-│   │ Sandbox │   │ Sandbox │   │ Sandbox │   ← 空闲待命     │
-│   │  (Idle) │   │  (Idle) │   │  (Idle) │                 │
-│   └─────────┘   └─────────┘   └─────────┘                │
-│        │                                                   │
-│        ▼  新会话到来 → SandboxClaim 认领                     │
-│   ┌─────────┐                                              │
-│   │ Sandbox │   ← 立即投入使用，零等待                        │
-│   │ (Active)│                                              │
-│   └─────────┘                                              │
-│                                                            │
-│   池自动异步补充，保持 steady-state                            │
-└────────────────────────────────────────────────────────────┘
++-----------------------------------------------------------+
+|                      Warm Pool                            |
+|                                                           |
+|   +-----------+   +-----------+   +-----------+           |
+|   |  Sandbox  |   |  Sandbox  |   |  Sandbox  |  <- idle  |
+|   |  (idle)   |   |  (idle)   |   |  (idle)   |           |
+|   +-----+-----+   +-----------+   +-----------+           |
+|         |                                                 |
+|         v  new session --> SandboxClaim                   |
+|   +-----------+                                           |
+|   |  Sandbox  |  <- claimed, ready to use                 |
+|   |  (active) |                                           |
+|   +-----------+                                           |
+|                                                           |
+|   pool replenishes asynchronously                         |
++-----------------------------------------------------------+
 ```
 
 实现上，Workload Manager 中的 `CodeInterpreterReconciler` 通过 **SandboxTemplate + SandboxWarmPool + SandboxClaim** 三层 CRD 协作：
@@ -228,23 +233,23 @@ if ctx.Err() == context.DeadlineExceeded {
 沙箱 Pod 是临时的，随时可能被替换。在集群配置中嵌入共享密钥既脆弱又难以轮换。AgentCube 建立了一条基于 RSA 非对称加密的信任链：
 
 ```
-┌──────────────┐                     ┌─────────────────────────┐
-│    Router    │                     │     Kubernetes Secret   │
-│              │  启动时生成           │  picod-router-identity  │
-│  RSA-2048    │ ──────────────────▶ │                         │
-│  密钥对      │                     │  private.pem (Router用)  │
-│              │                     │  public.pem  (PicoD用)   │
-└──────┬───────┘                     └───────────┬─────────────┘
-       │                                         │
-       │ 用私钥签发                                │ Workload Manager
-       │ 5分钟有效JWT                              │ 注入环境变量
-       │                                         │ PICOD_AUTH_PUBLIC_KEY
-       ▼                                         ▼
-┌──────────────┐    RS256 JWT Token       ┌──────────────┐
-│   请求签名    │ ──────────────────────▶  │    PicoD     │
-│   (私钥)     │                          │  验证签名     │
-└──────────────┘                          │  (公钥)       │
-                                          └──────────────┘
++--------------+                     +-------------------------+
+|    Router    |                     |    Kubernetes Secret    |
+|              |  generate on boot   |  picod-router-identity  |
+|  RSA-2048    | ------------------> |                         |
+|  key pair    |                     |  private.pem  (Router)  |
+|              |                     |  public.pem   (PicoD)   |
++------+-------+                     +------------+------------+
+       |                                          |
+       | sign with                    Workload Manager injects
+       | private key                  PICOD_AUTH_PUBLIC_KEY
+       | (5min TTL)                   into sandbox env
+       |                                          |
+       v                                          v
++--------------+   RS256 JWT Token   +--------------+
+| Router signs | ------------------> | PicoD verify |
+| (private key)|                     | (public key) |
++--------------+                     +--------------+
 ```
 
 关键安全设计：
@@ -303,7 +308,7 @@ AgentCube 可以作为 LangChain 的 `@tool` 接入 ReAct Agent 工作流，代�
 
 ### Dify 插件
 
-`integrations/dify-plugin/` 提供了 Dify 平台的工具集成，Dify 用户可以直接使用 AgentCube 的沙箱能力。
+项目仓库中的 dify-plugin 目录提供了 Dify 平台的工具集成，Dify 用户可以直接使用 AgentCube 的沙箱能力。
 
 ---
 
