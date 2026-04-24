@@ -106,8 +106,10 @@ Router 还支持 **HTTP/2 (h2c)** 透传以降低连接延迟，并内置可配�
 **Router 暴露的 API 端点：**
 
 ```
-POST /v1/namespaces/{ns}/agent-runtimes/{name}/invocations/*path
-POST /v1/namespaces/{ns}/code-interpreters/{name}/invocations/*path
+POST /v1/namespaces/{namespace}/agent-runtimes/{name}/invocations/*path
+GET  /v1/namespaces/{namespace}/agent-runtimes/{name}/invocations/*path
+POST /v1/namespaces/{namespace}/code-interpreters/{name}/invocations/*path
+GET  /v1/namespaces/{namespace}/code-interpreters/{name}/invocations/*path
 ```
 
 ---
