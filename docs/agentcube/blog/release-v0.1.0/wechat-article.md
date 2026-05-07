@@ -1,8 +1,8 @@
-# AgentCube v0.1.0 正式发布：让 AI Agent 成为 Kubernetes 的一等公民
+# AgentCube：让 AI Agent 成为 Kubernetes 的一等公民
 
-云原生批量计算引擎 Volcano 社区全新子项目 AgentCube 现已正式发布。AgentCube 的诞生基于 Volcano 在大规模高性能计算调度领域多年的生产实践积累，它将这种高并发、高吞吐的调度能力延伸至 AI 领域，构建了一套面向智能体（Agent）工作负载的 Serverless 编排层。
+AgentCube 是云原生批量计算引擎 Volcano 社区的子项目，基于 Volcano 在大规模高性能计算调度领域多年的生产实践积累，将高并发、高吞吐的调度能力延伸至 AI 领域，构建了一套面向智能体（Agent）工作负载的 Serverless 编排层。
 
-**v0.1.0 是 AgentCube 的首个正式版本**，建立了完整的基础架构，主要特性包括：
+AgentCube 已建立完整的基础架构，核心技术能力包括：
 
 - **AgentRuntime / CodeInterpreter CRD** —— 两种 Kubernetes 原生的 Agent 工作负载抽象
 - **Session-Based MicroVM 路由** —— 基于会话的有状态请求路由，每会话独立沙箱隔离
@@ -40,12 +40,12 @@ AgentCube 的架构分为三层：**数据平面（Router）**、**控制平面�
 
 核心组件一览：
 
-| 组件 | 角色 | 关键能力 |
-|------|------|----------|
-| **Router** | 数据平面入口 | HTTP 反向代理、会话路由、JWT 签名、并发控制 |
-| **Workload Manager** | 控制平面 | 沙箱创建/删除、预热池管理、双策略 GC |
-| **PicoD** | 沙箱内守护进程 | 代码执行、文件 I/O、JWT 认证、路径沙箱化 |
-| **Session Store** | 状态存储 | Redis/Valkey 支持，Sorted Set 索引加速查询 |
+| 组件                 | 角色           | 关键能力                                    |
+| -------------------- | -------------- | ------------------------------------------- |
+| **Router**           | 数据平面入口   | HTTP 反向代理、会话路由、JWT 签名、并发控制 |
+| **Workload Manager** | 控制平面       | 沙箱创建/删除、预热池管理、双策略 GC        |
+| **PicoD**            | 沙箱内守护进程 | 代码执行、文件 I/O、JWT 认证、路径沙箱化    |
+| **Session Store**    | 状态存储       | Redis/Valkey 支持，Sorted Set 索引加速查询  |
 
 一次完整的调用流程如下：
 
@@ -208,12 +208,12 @@ spec:
 
 PicoD (Pico Daemon) 用一个仅需几百 KB 的 HTTP 守护进程替代了 SSH，通过 RESTful API 完成沙箱内的所有操作：
 
-| API 端点 | 方法 | 功能 |
-|----------|------|------|
-| `/api/execute` | POST | 执行任意命令，支持超时、工作目录、环境变量 |
-| `/api/files` | POST | 文件上传/写入（multipart 或 base64 JSON） |
-| `/api/files/*path` | GET | 文件下载/读取，流式传输 |
-| `/health` | GET | 健康检查（免认证） |
+| API 端点           | 方法 | 功能                                       |
+| ------------------ | ---- | ------------------------------------------ |
+| `/api/execute`     | POST | 执行任意命令，支持超时、工作目录、环境变量 |
+| `/api/files`       | POST | 文件上传/写入（multipart 或 base64 JSON）  |
+| `/api/files/*path` | GET  | 文件下载/读取，流式传输                    |
+| `/health`          | GET  | 健康检查（免认证）                         |
 
 代码执行的实现遵循了**安全优先**原则：
 
@@ -275,10 +275,10 @@ if ctx.Err() == context.DeadlineExceeded {
 
 Agent 会话终止或被客户端遗弃后，必须自动回收资源以避免资源耗尽。AgentCube 在 Workload Manager 中实现了**双重垃圾回收策略**：
 
-| 策略 | 触发条件 | 默认值 |
-|------|----------|--------|
-| **空闲超时（Idle TTL）** | 沙箱在 `sessionTimeout` 内无任何请求 | 15 分钟 |
-| **绝对最大时长（Max Duration）** | 沙箱创建时间超过 `maxSessionDuration` | 8 小时 |
+| 策略                             | 触发条件                              | 默认值  |
+| -------------------------------- | ------------------------------------- | ------- |
+| **空闲超时（Idle TTL）**         | 沙箱在 `sessionTimeout` 内无任何请求  | 15 分钟 |
+| **绝对最大时长（Max Duration）** | 沙箱创建时间超过 `maxSessionDuration` | 8 小时  |
 
 GC 循环每 **15 秒**执行一次，每轮最多审查 **100 个候选沙箱**（防止单次 GC 阻塞过长）。底层使用 Redis Sorted Set 的 `ZRANGEBYSCORE` 高效查询过期和不活跃的沙箱：
 
@@ -295,7 +295,7 @@ Redis 数据结构：
 
 ## 生态集成
 
-AgentCube v0.1.0 为主流 AI 框架提供了现成的集成方案：
+AgentCube 为主流 AI 框架提供了现成的集成方案：
 
 ### Python SDK
 
@@ -374,7 +374,7 @@ curl -X POST \
 
 ## 致谢
 
-感谢所有为 AgentCube v0.1.0 做出贡献的开发者：
+感谢所有为 AgentCube 做出贡献的开发者：
 
 [@YaoZengzeng](https://github.com/YaoZengzeng)、[@acsoto](https://github.com/acsoto)、[@hzxuzhonghu](https://github.com/hzxuzhonghu)、[@Sagar-6203620715](https://github.com/Sagar-6203620715)、[@mahil-2040](https://github.com/mahil-2040)、[@t2wang](https://github.com/t2wang)、[@FAUST-BENCHOU](https://github.com/FAUST-BENCHOU)、[@tjucoder](https://github.com/tjucoder)、[@LaynePeng](https://github.com/LaynePeng)、[@yashisrani](https://github.com/yashisrani)、[@katara-Jayprakash](https://github.com/katara-Jayprakash)、[@LiZhenCheng9527](https://github.com/LiZhenCheng9527)、[@Tweakzx](https://github.com/Tweakzx)、[@warjiang](https://github.com/warjiang)、[@LeslieKuo](https://github.com/LeslieKuo)、[@MahaoAlex](https://github.com/MahaoAlex)、[@VanderChen](https://github.com/VanderChen)、[@kevin-wangzefeng](https://github.com/kevin-wangzefeng)、[@ifelseend](https://github.com/ifelseend)、[@cairon-ab](https://github.com/cairon-ab)、[@RushabhMehta2005](https://github.com/RushabhMehta2005)、[@Sanchit2662](https://github.com/Sanchit2662)、[@qizha](https://github.com/qizha)、[@ssfffss](https://github.com/ssfffss)、[@wjf295004046](https://github.com/wjf295004046)
 
